@@ -40,15 +40,7 @@ pub fn run(
     access_token: &AccessToken,
 ) -> Result<ExitStatus> {
     let signals = install_signal_handlers()?;
-
-    let mut adc_file = tempfile::Builder::new()
-        .prefix("gcpv-adc-")
-        .suffix(".json")
-        .tempfile()
-        .context("creating temporary ADC file")?;
-    serde_json::to_writer_pretty(&mut adc_file, &credentials::adc(profile, refresh_token))
-        .context("writing temporary ADC file")?;
-    adc_file.flush().context("flushing temporary ADC file")?;
+    let adc_file = temporary_adc(profile, refresh_token)?;
 
     let (program, arguments) = match command {
         [] => (default_shell(), &[] as &[String]),
@@ -68,6 +60,21 @@ pub fn run(
     let status = wait_for_child(&mut child, &signals)?;
     drop(adc_file);
     Ok(status)
+}
+
+fn temporary_adc(
+    profile: &Profile,
+    refresh_token: &SecretString,
+) -> Result<tempfile::NamedTempFile> {
+    let mut file = tempfile::Builder::new()
+        .prefix("gcpv-adc-")
+        .suffix(".json")
+        .tempfile()
+        .context("creating temporary ADC file")?;
+    serde_json::to_writer_pretty(&mut file, &credentials::adc(profile, refresh_token))
+        .context("writing temporary ADC file")?;
+    file.flush().context("flushing temporary ADC file")?;
+    Ok(file)
 }
 
 #[cfg(unix)]
@@ -102,11 +109,8 @@ impl SignalState {
     }
 }
 
-#[cfg(windows)]
-type SignalState = ();
-
-#[cfg(not(any(unix, windows)))]
-type SignalState = ();
+#[cfg(not(unix))]
+struct SignalState;
 
 #[cfg(unix)]
 fn wait_for_child(child: &mut std::process::Child, signals: &SignalState) -> Result<ExitStatus> {
@@ -227,12 +231,12 @@ fn install_signal_handlers() -> Result<SignalState> {
         .get_or_init(|| ctrlc::set_handler(|| {}).map_err(|error| error.to_string()))
         .clone()
         .map_err(|error| anyhow!("installing Ctrl-C handler: {error}"))?;
-    Ok(())
+    Ok(SignalState)
 }
 
 #[cfg(not(any(unix, windows)))]
 fn install_signal_handlers() -> Result<SignalState> {
-    Ok(())
+    Ok(SignalState)
 }
 
 #[cfg(test)]
@@ -253,6 +257,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn refresh_token() -> SecretString {
         SecretString::new("refresh-token")
     }
@@ -321,8 +326,6 @@ mod tests {
         let output = output_directory.path().join("environment.txt");
         let script = format!(
             "echo \"$GOOGLE_APPLICATION_CREDENTIALS\" > {out}; \
-             stat -f %Lp \"$GOOGLE_APPLICATION_CREDENTIALS\" >> {out} 2>/dev/null \
-               || stat -c %a \"$GOOGLE_APPLICATION_CREDENTIALS\" >> {out}; \
              echo \"$CLOUDSDK_AUTH_ACCESS_TOKEN|${{GOOGLE_OAUTH_ACCESS_TOKEN-unset}}|$GCPV_PROFILE|$CLOUDSDK_CORE_PROJECT|$GOOGLE_CLOUD_QUOTA_PROJECT|$CLOUDSDK_CORE_ACCOUNT\" >> {out}; \
              cat \"$GOOGLE_APPLICATION_CREDENTIALS\" >> {out}",
             out = output.display()
@@ -337,12 +340,22 @@ mod tests {
         let adc_path = lines.next().unwrap();
         assert!(adc_path.contains("gcpv-adc-"));
         assert!(!Path::new(adc_path).exists());
-        assert_eq!(lines.next().unwrap(), "600");
         assert_eq!(
             lines.next().unwrap(),
             "access-token|unset|test-profile|project-a|project-a|test@example.com"
         );
         assert!(data.contains("\"refresh_token\": \"refresh-token\""));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn temporary_adc_has_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let refresh = refresh_token();
+        let file = temporary_adc(&profile(), &refresh).unwrap();
+        let mode = file.as_file().metadata().unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]
