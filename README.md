@@ -46,6 +46,55 @@ Requires Rust 1.97 or newer.
 cargo install --git https://github.com/hatemosphere/google-cloud-credentials-vault --locked
 ```
 
+## Make gcpv the only local auth source
+
+This cleanup is optional: gcpv already isolates wrapped commands from native
+gcloud credentials. Use it on a local workstation if you also want unwrapped
+`gcloud` commands to fail instead of silently using a previously active
+account.
+
+Native gcloud CLI credentials and local Application Default Credentials (ADC)
+are separate stores, so remove both before logging back into gcpv:
+
+```console
+# Delete and revoke ADC created by `gcloud auth application-default login`.
+gcloud auth application-default revoke
+
+# Remove every account stored by the gcloud CLI and revoke user tokens.
+gcloud auth revoke --all
+
+# Recreate gcpv credentials last.
+gcpv login work
+```
+
+Run the native revocations first. gcpv uses Google's public gcloud OAuth client,
+so revoking an older gcloud authorization can also invalidate an existing gcpv
+refresh token for that Google account.
+
+Verify from a fresh, ordinary shell—not from inside `gcpv exec`:
+
+```console
+# Prints no active account.
+gcloud auth list --filter=status:ACTIVE --format='value(account)'
+
+# Fails without authentication.
+gcloud organizations list
+
+# Still works through the selected profile.
+gcpv exec work -- gcloud organizations list
+```
+
+This does not delete service-account key files or revoke credentials owned by
+an external identity provider. Explicit token flags, `CLOUDSDK_AUTH_*`
+environment variables, or Google Cloud metadata credentials can also keep bare
+gcloud commands authenticated; remove those separately if present. The
+[`gcloud auth revoke`][gcloud-auth-revoke] and
+[`gcloud auth application-default revoke`][adc-revoke] references describe the
+exact behavior.
+
+[gcloud-auth-revoke]: https://cloud.google.com/sdk/gcloud/reference/auth/revoke
+[adc-revoke]: https://cloud.google.com/sdk/gcloud/reference/auth/application-default/revoke
+
 ## Commands
 
 | Command | Purpose |
